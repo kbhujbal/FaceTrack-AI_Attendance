@@ -1,175 +1,144 @@
 # Face Recognition Attendance System
 
-**Enterprise-grade automated attendance tracking using Raspberry Pi edge devices and cloud-based intelligence.**
+Enterprise-grade automated attendance tracking using Raspberry Pi edge devices and cloud backend with smart caching.
 
 ## Overview
 
-This system deploys Raspberry Pi units with cameras in classrooms to automatically mark student attendance using face recognition. The hybrid edge-cloud architecture ensures scalability, reliability, and performance even with thousands of students.
+Deploy Raspberry Pi cameras in classrooms to automatically mark student attendance via face recognition. The system handles thousands of students efficiently through hybrid edge-cloud architecture.
 
-### Key Features
-
-- **Smart Caching**: Pi downloads only enrolled students for current class (50 instead of 5,000)
-- **Edge Processing**: Face detection runs locally on Pi for low latency
-- **Async Architecture**: Cloud handles attendance spikes (9 AM rush) gracefully
-- **Debouncing**: Prevents duplicate marks within configurable time window
-- **Offline Resilience**: Pi queues records locally if network fails
-- **Real-time Monitoring**: Track device health, attendance rates, system performance
-
-## Architecture
-
-```
-┌─────────────┐
-│ Raspberry Pi │ ──┐
-│  + Camera    │   │
-└─────────────┘   │
-                  │  Every 10min: "What class is now?"
-┌─────────────┐   │  Downloads: 50 student embeddings
-│ Raspberry Pi │───┤
-│  + Camera    │   │  Uploads: Batch attendance records
-└─────────────┘   │
-                  │
-       ...        │
-                  ▼
-         ┌──────────────┐      ┌──────────────┐
-         │ Load Balancer│─────▶│   FastAPI    │
-         │    nginx     │      │   Backend    │
-         └──────────────┘      └──────────────┘
-                                       │
-                    ┌──────────────────┼──────────────────┐
-                    │                  │                  │
-            ┌───────▼──────┐  ┌────────▼─────┐  ┌────────▼─────┐
-            │  PostgreSQL  │  │  Redis Cache │  │ Message Queue│
-            │  (Partitioned)│  │ (Schedules) │  │  (RabbitMQ)  │
-            └──────────────┘  └──────────────┘  └──────────────┘
-```
+**Core Innovation:** Pi downloads only students enrolled in current class (50 vs 5,000 embeddings) → 100x faster recognition.
 
 ## Quick Start
 
-### Prerequisites
-
-- **Cloud**: PostgreSQL 14+, Redis 7+, Python 3.9+
-- **Pi**: Raspberry Pi 4/5, Pi Camera Module, 64GB microSD
-
-### 1. Deploy Cloud Backend
+### Option 1: Docker Deployment (Recommended)
 
 ```bash
-cd backend
+# Start entire system
+docker-compose up -d
 
-# Setup database
-psql -h your-db-host -U postgres -f ../database/schema.sql
+# Access API docs
+open http://localhost:8000/docs
+```
+
+### Option 2: Manual Setup
+
+**Backend:**
+```bash
+cd backend
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
 # Configure
 cp .env.example .env
-nano .env  # Edit DATABASE_URL, REDIS_URL, etc.
+nano .env  # Set DATABASE_URL, REDIS_URL, SECRET_KEY
 
-# Install and run
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+# Initialize database
+psql -h localhost -U postgres -f ../database/schema.sql
+
+# Run server
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-API Docs: `http://localhost:8000/docs`
-
-### 2. Setup Raspberry Pi
-
+**Raspberry Pi:**
 ```bash
 cd pi_client
-
-# Install dependencies
 sudo apt install python3-opencv cmake libboost-all-dev
 pip install -r requirements.txt
 
 # Configure
 cp .env.example .env
-nano .env  # Set CLASSROOM_ID, API_KEY, etc.
+nano .env  # Set CLASSROOM_ID, API_BASE_URL, API_KEY
 
-# Run
+# Run client
 python main.py
 ```
 
-### 3. Add Sample Data
-
-```sql
--- Already included in schema.sql
--- 5 students, 3 courses, schedules, etc.
-
--- Add face embeddings (Python script)
-python scripts/encode_faces.py --student S001 --image photos/alice.jpg
+**Encode student faces:**
+```bash
+python scripts/encode_faces.py --batch photos/
+# Expected format: photos/S001.jpg, photos/S002.jpg, etc.
 ```
+
+## Architecture
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design.
+
+```
+┌─────────────┐
+│ Pi + Camera │───┐  Every 10min: "What class is scheduled?"
+└─────────────┘   │  Downloads: Only enrolled students (50)
+                  │  Uploads: Attendance batch (10 records)
+┌─────────────┐   │
+│ Pi + Camera │───┤
+└─────────────┘   ▼
+            ┌──────────┐    ┌──────────────────┐
+            │ FastAPI  │────│ PostgreSQL + Redis│
+            │ Backend  │    │ Message Queue     │
+            └──────────┘    └──────────────────┘
+```
+
+**Data Flow:**
+1. Pi queries: "What class is in LAB-301 right now?"
+2. Cloud returns: Course CS101 + 50 student face embeddings
+3. Pi detects faces → matches against 50 (not 5,000)
+4. Pi uploads: Batch attendance records every 60 seconds
+5. Cloud processes: Async queue → PostgreSQL
+
+## Key Features
+
+- **Smart Caching**: Pi caches only relevant students → 100x speedup
+- **Edge Processing**: Face detection on Pi → low latency
+- **Offline Mode**: Local queue if network fails → zero data loss
+- **Debouncing**: Prevents duplicate marks (30s window)
+- **Async Processing**: Handles 9 AM spike (1,000+ req/min)
+- **Partitioned DB**: Monthly partitions for performance
 
 ## Project Structure
 
 ```
 FastrackAI/
 ├── ARCHITECTURE.md          # Detailed system design
-├── DEPLOYMENT.md            # Production deployment guide
 ├── README.md                # This file
+├── docker-compose.yml       # One-command deployment
 │
 ├── database/
-│   └── schema.sql           # PostgreSQL schema with partitions
+│   └── schema.sql           # PostgreSQL schema (partitioned)
 │
-├── backend/                 # Cloud API (FastAPI)
+├── backend/                 # Cloud API
 │   ├── app/
-│   │   ├── main.py          # Application entry point
-│   │   ├── config.py        # Settings management
-│   │   ├── database.py      # SQLAlchemy setup
-│   │   ├── schemas.py       # Pydantic models
-│   │   └── api/v1/
-│   │       ├── schedule.py  # GET /schedule endpoint
-│   │       ├── attendance.py# POST /attendance endpoint
-│   │       └── heartbeat.py # POST /heartbeat endpoint
-│   ├── requirements.txt
-│   └── .env.example
+│   │   ├── main.py
+│   │   ├── api/v1/
+│   │   │   ├── schedule.py     # GET /schedule
+│   │   │   ├── attendance.py   # POST /attendance
+│   │   │   └── heartbeat.py    # POST /heartbeat
+│   ├── Dockerfile
+│   └── requirements.txt
 │
-└── pi_client/               # Raspberry Pi edge client
-    ├── main.py              # Application orchestrator
-    ├── config.py            # Configuration (Pydantic)
-    ├── camera.py            # Face detection & recognition
-    ├── sync_manager.py      # Cloud API communication
-    ├── requirements.txt
-    └── .env.example
+├── pi_client/               # Raspberry Pi edge client
+│   ├── main.py              # Orchestrator
+│   ├── camera.py            # Face detection/recognition
+│   ├── sync_manager.py      # API sync + caching
+│   └── requirements.txt
+│
+└── scripts/
+    └── encode_faces.py      # Encode student photos
 ```
 
-## API Endpoints
+## API Reference
 
-### 1. GET /api/v1/schedule
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/v1/schedule?room_id=LAB-301` | GET | Fetch current class + student roster |
+| `/api/v1/attendance` | POST | Submit attendance batch |
+| `/api/v1/attendance/student/{id}` | GET | Student attendance history |
+| `/api/v1/attendance/course/{id}` | GET | Class attendance report |
 
-**Purpose**: Pi fetches current class and student roster
-
-**Request:**
+**Example - Submit Attendance:**
 ```bash
-curl "http://api.attendance.example.com/api/v1/schedule?room_id=LAB-301"
-```
-
-**Response:**
-```json
-{
-  "course_id": "CS101",
-  "course_name": "Data Structures",
-  "start_time": "09:00",
-  "end_time": "10:30",
-  "enrolled_students": [
-    {
-      "student_id": "S001",
-      "name": "Alice Johnson",
-      "email": "alice.j@university.edu",
-      "face_encoding": "<binary data>"
-    }
-  ]
-}
-```
-
-### 2. POST /api/v1/attendance
-
-**Purpose**: Pi uploads batch of attendance records
-
-**Request:**
-```bash
-curl -X POST http://api.attendance.example.com/api/v1/attendance \
+curl -X POST http://localhost:8000/api/v1/attendance \
   -H "Content-Type: application/json" \
   -d '{
-    "device_id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+    "device_id": "pi-lab301",
     "records": [
       {
         "student_id": "S001",
@@ -181,76 +150,189 @@ curl -X POST http://api.attendance.example.com/api/v1/attendance \
   }'
 ```
 
-**Response:** `202 Accepted` (async processing)
-
-### 3. GET /api/v1/attendance/course/{course_id}
-
-**Purpose**: Admin views attendance for a class
-
-**Response:**
-```json
-{
-  "course_id": "CS101",
-  "date": "2024-01-15",
-  "total_enrolled": 50,
-  "present": 47,
-  "absent": 3,
-  "attendance_percentage": 94.0,
-  "students": [...]
-}
-```
-
 ## Configuration
 
-### Raspberry Pi (.env)
+**Backend (.env):**
+```bash
+DATABASE_URL=postgresql://user:pass@localhost:5432/attendance_db
+REDIS_URL=redis://localhost:6379/0
+SECRET_KEY=your-secret-key-here
+API_PREFIX=/api/v1
+WORKERS=4
+```
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CLASSROOM_ID` | Unique classroom identifier | Required |
-| `API_BASE_URL` | Cloud API endpoint | Required |
-| `API_KEY` | Authentication token | Required |
-| `RECOGNITION_THRESHOLD` | Match threshold (0-1) | 0.6 |
-| `DEBOUNCE_SECONDS` | Duplicate prevention | 30 |
-| `FRAME_SKIP` | Process every Nth frame | 3 |
-| `BATCH_SIZE` | Records per upload | 10 |
+**Pi Client (.env):**
+```bash
+DEVICE_UUID=a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11
+CLASSROOM_ID=LAB-301
+API_BASE_URL=https://api.attendance.example.com
+API_KEY=your_api_key_here
+RECOGNITION_THRESHOLD=0.6
+DEBOUNCE_SECONDS=30
+FRAME_SKIP=3  # Process every 3rd frame
+```
 
-### Backend (.env)
-
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `REDIS_URL` | Redis cache endpoint |
-| `SECRET_KEY` | JWT signing key |
-| `CORS_ORIGINS` | Allowed frontend origins |
-
-## Performance Benchmarks
+## Performance
 
 **Raspberry Pi 4 (4GB):**
-- Face detection: ~200ms per frame
-- Recognition (50 students): ~150ms
-- Throughput: ~2 students/second
-- Typical classroom entry: 1 student/5 seconds → **No queue buildup**
+- Face detection: 200ms
+- Recognition (50 students): 150ms
+- Throughput: 2 students/second
+- Result: No bottleneck (1 student enters every 5 seconds)
 
 **Cloud API:**
-- Latency (P95): < 200ms
-- Throughput: 1,000+ requests/minute
-- Handles 100 classrooms × 50 students = 5,000 records at 9 AM
+- Latency P95: <200ms
+- Throughput: 1,000+ req/min
+- Scales: 100 classrooms × 50 students at 9 AM
+
+## Hardware Requirements
+
+**Recommended:**
+- Raspberry Pi 5 (8GB) or Pi 4 (4GB)
+- Pi Camera Module 3 or Logitech C920
+- 64GB microSD (high endurance)
+- Argon NEO 5 cooling case
+- Ethernet (avoid WiFi congestion)
+
+**Cloud (for 100 classrooms):**
+- 2× t3.medium (backend)
+- db.t3.small (PostgreSQL)
+- cache.t3.micro (Redis)
+- Cost: ~$200/month
+
+## Database Quick Reference
+
+```sql
+-- View current schedule
+SELECT * FROM current_schedule WHERE classroom_id = 'LAB-301';
+
+-- Today's attendance
+SELECT s.first_name, s.last_name, al.timestamp
+FROM attendance_logs al
+JOIN students s ON al.student_id = s.student_id
+WHERE DATE(al.timestamp) = CURRENT_DATE;
+
+-- Attendance percentage per student
+SELECT * FROM student_attendance_summary WHERE course_id = 'CS101';
+
+-- Get enrolled students for current class (what Pi calls)
+SELECT * FROM get_enrolled_students_for_class('LAB-301', CURRENT_TIMESTAMP);
+```
+
+## Troubleshooting
+
+**Pi camera not working:**
+```bash
+vcgencmd get_camera  # Should show: supported=1 detected=1
+sudo raspi-config → Interface Options → Camera → Enable
+```
+
+**Slow recognition:**
+```bash
+# Edit pi_client/.env
+FRAME_SKIP=5          # Was 3
+CAMERA_FPS=20         # Was 30
+RECOGNITION_MODEL=hog # Faster than 'cnn'
+```
+
+**Backend won't start:**
+```bash
+docker logs attendance_backend
+# Check DATABASE_URL, REDIS_URL in .env
+```
+
+**API timeouts:**
+```bash
+curl http://localhost:8000/health  # Should return {"status":"healthy"}
+```
+
+## Deployment Checklist
+
+- [ ] Change default passwords (postgres, redis)
+- [ ] Generate new SECRET_KEY for backend
+- [ ] Rotate API_KEY for Pi devices
+- [ ] Enable SSL/TLS (Let's Encrypt)
+- [ ] Configure firewall (allow only Pi IPs)
+- [ ] Set up database backups (daily)
+- [ ] Enable monitoring (Prometheus/Grafana)
+- [ ] Test with 3 Pis in pilot classrooms
+- [ ] Tune RECOGNITION_THRESHOLD based on accuracy
 
 ## Security
 
-- Face embeddings stored as binary (not reversible to images)
-- API authentication via JWT tokens
-- TLS 1.3 for all communication
+- Face embeddings are **binary vectors** (not reversible to images)
+- JWT authentication for API access
+- TLS 1.3 encryption for all communication
 - Rate limiting: 100 requests/min per device
-- GDPR/FERPA compliant (consent management, data retention)
+- GDPR/FERPA compliant (consent + data retention policies)
+
+## Scaling Guidelines
+
+| Students | Backend | Database | Redis | Cost/Month |
+|----------|---------|----------|-------|------------|
+| < 1,000 | 2× t3.small | db.t3.small | cache.t3.micro | $200 |
+| 1,000-5,000 | 3× t3.medium | db.r5.large | cache.r5.large | $500 |
+| 5,000-20,000 | 5× t3.large | db.r5.xlarge | cache.r5.xlarge | $1,500 |
+
+## Common Tasks
+
+**Add new student:**
+```bash
+# 1. Insert to database
+psql -d attendance_db -c "INSERT INTO students (student_id, first_name, last_name, email) VALUES ('S999', 'John', 'Doe', 'john@example.com');"
+
+# 2. Encode face
+python scripts/encode_faces.py --student S999 --image photos/john.jpg
+
+# 3. Verify
+python scripts/encode_faces.py --verify S999
+```
+
+**Add new course:**
+```sql
+INSERT INTO courses (course_id, course_code, course_name, department, credits)
+VALUES ('CS301', 'CSE301', 'Machine Learning', 'Computer Science', 4);
+
+-- Enroll students
+INSERT INTO enrollments (student_id, course_id) VALUES ('S001', 'CS301');
+
+-- Create schedule
+INSERT INTO schedules (course_id, classroom_id, day_of_week, start_time, end_time, effective_from, effective_to)
+VALUES ('CS301', 'LAB-301', 1, '14:00', '15:30', CURRENT_DATE, CURRENT_DATE + INTERVAL '6 months');
+```
+
+**Deploy new Pi:**
+```bash
+# Generate UUID
+python3 -c "import uuid; print(uuid.uuid4())"
+
+# Configure .env with new UUID and CLASSROOM_ID
+
+# Create systemd service for auto-start
+sudo nano /etc/systemd/system/attendance.service
+sudo systemctl enable attendance
+sudo systemctl start attendance
+```
 
 ## Monitoring
+
+**Logs:**
+```bash
+# Backend
+docker logs -f attendance_backend
+
+# Pi (if using systemd)
+sudo journalctl -u attendance -f
+
+# Database
+docker exec -it attendance_db psql -U user -d attendance_db
+```
 
 **Metrics (Prometheus):**
 - `face_detection_latency_seconds`
 - `recognition_accuracy_ratio`
 - `api_request_duration_seconds`
-- `queue_depth_local_db`
+- `attendance_records_total`
 
 **Alerts:**
 - Pi offline > 10 minutes
@@ -258,64 +340,14 @@ curl -X POST http://api.attendance.example.com/api/v1/attendance \
 - Recognition accuracy < 85%
 - API latency > 500ms
 
-## Troubleshooting
+## Documentation
 
-### Pi camera not working
-```bash
-vcgencmd get_camera
-# Enable: sudo raspi-config → Interface Options → Camera
-```
-
-### Slow recognition
-- Reduce `CAMERA_FPS` (30 → 20)
-- Increase `FRAME_SKIP` (3 → 5)
-- Use `hog` model instead of `cnn`
-
-### API timeouts
-- Check firewall rules
-- Verify `API_BASE_URL` in .env
-- Test: `curl https://api.example.com/health`
-
-## Development
-
-### Run Tests
-```bash
-# Backend
-cd backend
-pytest
-
-# Pi Client (requires camera)
-cd pi_client
-python camera.py  # Visual test
-```
-
-### Database Migrations
-```bash
-cd backend
-alembic revision --autogenerate -m "Description"
-alembic upgrade head
-```
-
-## Roadmap
-
-- [x] Core face recognition system
-- [x] Smart caching and sync
-- [x] Cloud API with async processing
-- [ ] Admin dashboard (React)
-- [ ] Mobile app for faculty
-- [ ] Mask detection support
-- [ ] Multi-face tracking optimization
-- [ ] LMS integration (Canvas, Moodle)
+- **ARCHITECTURE.md** - Detailed system design, data flow, scalability strategies
+- **README.md** - This file (quick start + reference)
 
 ## License
 
-MIT License - See LICENSE file
-
-## Support
-
-- **Documentation**: See [ARCHITECTURE.md](ARCHITECTURE.md) and [DEPLOYMENT.md](DEPLOYMENT.md)
-- **Issues**: Open GitHub issue
-- **Email**: support@attendance.example.com
+MIT License
 
 ---
 
