@@ -347,7 +347,7 @@ docker exec -it attendance_db psql -U user -d attendance_db
 
 ## License
 
-MIT License
+MIT License - see [LICENSE](LICENSE) file for details
 
 ---
 
